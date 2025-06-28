@@ -94,6 +94,91 @@ def get_topk_with_ties(group, key, k, ascending=False):
     # Keep all rows where p2p_rate_len is >= kth_value
     return group_sorted[group_sorted[key] >= kth_value]
 
+
+def accuracy_topkp2p_then_exitreason_then_yesprob(df, k=3):
+    df = df.copy() 
+    # df['p2p_rate_len'] = df['p2p_rate'].apply(len)
+    df['p2p_rate_len'] = df['p2p_rates']    
+    
+    grouped = df.groupby("docker_images")
+    final_corrects = []
+
+    for docker_image, group in grouped:
+        # Sort by p2p_rate_len descending and take the top k rows
+        # topk = group.sort_values(by="p2p_rate_len", ascending=False).head(k)
+        topk = get_topk_with_ties(group, "p2p_rate_len", k)
+        # import pdb; pdb.set_trace()
+        # now topk 'agent' in exit_reasons (but only if there is at least one agent)
+        if len(topk[topk["exit_reasons"] == "agent"]) > 0:
+            topk = topk[topk["exit_reasons"] == "agent"]
+        # if len(topk[topk["exit_reasons"].str.contains("agent")]) > 0:
+        #     topk = topk[topk["exit_reasons"].str.contains("agent")]
+        
+        # Among the top k, select the row with the highest avg_yes_prob
+        chosen_row = topk.loc[topk["avg_yes_prob"].idxmax()]
+        
+        final_corrects.append(chosen_row["gt_correct"])
+
+    # Overall accuracy
+    if not final_corrects:
+        return 0.0
+    return sum(final_corrects) / N
+
+
+def accuracy_topkexitreason_then_yesprob(df, k=3):
+    df = df.copy() 
+    # df['p2p_rate_len'] = df['p2p_rate'].apply(len)
+    df['p2p_rate_len'] = df['p2p_rates']    
+    
+    grouped = df.groupby("docker_images")
+    final_corrects = []
+
+    for docker_image, group in grouped:
+        # Sort by p2p_rate_len descending and take the top k rows
+        # topk = group.sort_values(by="p2p_rate_len", ascending=False).head(k)
+        topk = group #get_topk_with_ties(group, "p2p_rate_len", k)
+        # import pdb; pdb.set_trace()
+        # now topk exit_reason=agent (but only if there is at least one agent)
+        if len(topk[topk["exit_reasons"] == "agent"]) > 0:
+            topk = topk[topk["exit_reasons"] == "agent"]
+        
+        # Among the top k, select the row with the highest avg_yes_prob
+        chosen_row = topk.loc[topk["avg_yes_prob"].idxmax()]
+        
+        final_corrects.append(chosen_row["gt_correct"])
+
+    # Overall accuracy
+    if not final_corrects:
+        return 0.0
+    return sum(final_corrects) / N
+
+def accuracy_topkyesprob_then_exitreason_then_p2p(df, k=3):
+    df = df.copy()  
+    # df['p2p_rate_len'] = df['p2p_rate'].apply(len)
+    df['p2p_rate_len'] = df['p2p_rates']
+    
+    grouped = df.groupby("docker_images")
+    final_corrects = []
+
+    for docker_image, group in grouped:
+        # Sort by avg_yes_prob descending and take top k rows
+        topk = group.sort_values(by="avg_yes_prob", ascending=False).head(k)
+
+        # now topk 'agent' in exit_reasons (but only if there is at least one agent)
+        if len(topk[topk["exit_reasons"] == "agent"]) > 0:
+            topk = topk[topk["exit_reasons"] == "agent"]
+        # if len(topk[topk["exit_reasons"].str.contains("agent")]) > 0:
+        #     topk = topk[topk["exit_reasons"].str.contains("agent")]
+
+        # Among the top k, select the row with the highest p2p_rate_len
+        chosen_row = topk.loc[topk["p2p_rate_len"].idxmax()]
+        final_corrects.append(chosen_row["gt_correct"])
+
+    # Overall accuracy
+    if not final_corrects:
+        return 0.0
+    return sum(final_corrects) / N
+
 # # Load the CSV file into a DataFrame
 # # df = pd.read_csv("./src/r2e_edits/agenthub/train/results_traj_verifier-14B-v2.csv")
 # # df = pd.read_csv("./src/r2e_edits/agenthub/train/results_traj_verifiernew-14B-v3.csv")
@@ -138,7 +223,23 @@ def get_topk_with_ties(group, key, k, ascending=False):
 # def main():
 #     run_aggregation(df)
 
-df = pd.read_csv("./deepswe-verifier-only-matching-pairs-qwen3-14b-lora64_N16_traindata_p2p-14B-75k-lr1en5-v1.csv")
+# df = pd.read_csv("./deepswe-verifier-only-matching-pairs-qwen3-14b-lora64_N16_traindata_p2p-14B-75k-lr1en5-v1.csv")
+df = pd.read_csv("./deepswe-verifier-agent-priority-qwen3-14b-lora64_N16_traindata_p2p-14B-75k-lr1en5-v1.csv")
+
+# load the regression data
+USE_REGRESSION_DATA = True
+if USE_REGRESSION_DATA:
+    # load hf dataset with regression count (r2e-edits/deepswe-swebv-eval-n16-verifier-v1-with-regression)
+    from datasets import load_dataset
+    print ("size of df before merging:", len(df))
+    dataset = load_dataset("r2e-edits/deepswe-swebv-eval-n16-verifier-v1-with-regression", split="train")
+    df_regression = dataset.to_pandas()
+    # merge df_regression with df on docker_images and exp_names (i.e. both should match)
+    df = pd.merge(df, df_regression, on=["docker_images", "exp_names"], how="left")
+    print ("size of df after merging:", len(df))
+    # use regression_pass_count instead of p2p_rates
+    df['p2p_rates'] = df['regression_pass_count']
+    df['exit_reasons'] = df['exit_reasons_x']
 
 def run_aggregation(df):
     # Group by 'docker_images' and select the row with the maximum avg_yes_prob from each group
@@ -160,14 +261,51 @@ def run_aggregation(df):
     overall_accuracy = df['correct_prediction'].mean()
     print("\nOverall RM Accuracy:", overall_accuracy)
 
-
+    # defaults k=10 for first and k=1 for second
     k=10
     acc_topk = accuracy_topkyesprob_then_p2p(df,k=k)
     print(f"Accuracy (top k [{k}] yesprob -> highest p2p_rate):", acc_topk)
-
-    k=1
+    k=5
     acc_topk = accuracy_topkp2p_then_yesprob(df,k=k)
     print(f"Accuracy (top k [{k}] p2p -> highest yesprob):", acc_topk)
+    k=5
+    acc_topk = accuracy_topkp2p_then_exitreason_then_yesprob(df,k=k)
+    print(f"Accuracy (top k [{k}] p2p -> exitreason=agent -> highest yesprob):", acc_topk)
+    k=5
+    acc_topk = accuracy_topkexitreason_then_yesprob(df,k=k)
+    print(f"Accuracy (top k [{k}] exitreason=agent -> highest yesprob):", acc_topk)
+    k=5
+    acc_topk = accuracy_topkyesprob_then_exitreason_then_p2p(df,k=k)
+    print(f"Accuracy (top k [{k}] yesprob -> exitreason=agent -> highest p2p_rate):", acc_topk)
+    print ("--------------------------------")
+
+    k=1
+    for k in range(1, 11):
+        print ("k:", k)
+        acc_topk = accuracy_topkyesprob_then_p2p(df,k=k)
+        print(f"Accuracy (top k [{k}] yesprob -> highest p2p_rate):", acc_topk)
+    print ("--------------------------------")
+    # loop over k=1,2,3,4,5, 6, 7, 8, 9, 10
+    for k in range(1, 11):
+        print ("k:", k)
+        acc_topk = accuracy_topkp2p_then_yesprob(df,k=k)
+        print(f"Accuracy (top k [{k}] p2p -> highest yesprob):", acc_topk)
+    print ("--------------------------------")
+    for k in range(1, 11):
+        print ("k:", k)
+        acc_topk = accuracy_topkp2p_then_exitreason_then_yesprob(df,k=k)
+        print(f"Accuracy (top k [{k}] p2p -> exitreason=agent -> highest yesprob):", acc_topk)
+    print ("--------------------------------")
+    for k in range(1, 11):
+        print ("k:", k)
+        acc_topk = accuracy_topkexitreason_then_yesprob(df,k=k)
+        print(f"Accuracy (top k [{k}] exitreason=agent -> highest yesprob):", acc_topk)
+    print ("--------------------------------")
+    for k in range(1, 11):
+        print ("k:", k)
+        acc_topk = accuracy_topkyesprob_then_exitreason_then_p2p(df,k=k)
+        print(f"Accuracy (top k [{k}] yesprob -> exitreason=agent -> highest p2p_rate):", acc_topk)
+    print ("--------------------------------")
 
 run_aggregation(df)
 
